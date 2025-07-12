@@ -1,4 +1,4 @@
-
+#predict.py
 import hydra
 import torch
 import argparse
@@ -19,6 +19,10 @@ from deep_sort_pytorch.utils.parser import get_config
 from deep_sort_pytorch.deep_sort import DeepSort
 from collections import deque
 import numpy as np
+from utils import get_car, read_license_plate, write_csv
+from ultralytics import YOLO
+results = {}
+license_plate_detector = YOLO('./models/license_plate_detector.pt')
 palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
 data_deque = {}
 
@@ -321,6 +325,36 @@ class DetectionPredictor(BasePredictor):
             object_id = outputs[:, -1]
             
             draw_boxes(im0, bbox_xyxy, self.model.names, object_id,identities)
+        # Detect license plates on current frame
+        license_plates = license_plate_detector(im0)[0]  # use pretrained model
+
+        for license_plate in license_plates.boxes.data.tolist():
+            x1, y1, x2, y2, score, class_id = license_plate
+
+            # Match license plate to tracked vehicle via bounding box overlap
+            xcar1, ycar1, xcar2, ycar2, car_id = get_car(license_plate, outputs.tolist())
+            
+            if car_id != -1:
+                license_plate_crop = im0[int(y1):int(y2), int(x1): int(x2)]
+                try:
+                    gray = cv2.cvtColor(license_plate_crop, cv2.COLOR_BGR2GRAY)
+                    _, thresh = cv2.threshold(gray, 64, 255, cv2.THRESH_BINARY_INV)
+                    text, text_score = read_license_plate(thresh)
+                except:
+                    text, text_score = None, None
+                
+                if text is not None:
+                    if frame not in results:
+                        results[frame] = {}
+                    results[frame][car_id] = {
+                        'car': {'bbox': [xcar1, ycar1, xcar2, ycar2]},
+                        'license_plate': {
+                            'bbox': [x1, y1, x2, y2],
+                            'text': text,
+                            'bbox_score': score,
+                            'text_score': text_score
+                        }
+                    }
 
         return log_string
 
@@ -333,6 +367,8 @@ def predict(cfg):
     cfg.source = cfg.source if cfg.source is not None else ROOT / "assets"
     predictor = DetectionPredictor(cfg)
     predictor()
+    # Save results
+    write_csv(results, './output.csv')
 
 
 if __name__ == "__main__":
